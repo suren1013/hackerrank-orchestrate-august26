@@ -1,0 +1,9 @@
+# Core data handling
+pandas>=2.0.0
+numpy>=1.24.0
+
+# (Optional) Later phases will add:
+# - openai / anthropic for LLM routing
+# - pytesseract / easyocr for image OCR
+# - openai-whisper for voice transcription
+# - scikit-learn for retrieval / classification

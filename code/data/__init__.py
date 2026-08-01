@@ -1,0 +1,1 @@
+"""Data loading and context assembly for the Message Notification Router."""
