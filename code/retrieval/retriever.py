@@ -98,6 +98,7 @@ class RetrievalEngine:
             business=business_rel,
             group=group_rel,
             engagement=engagement,
+            context=context,
         )
 
         return RetrievalResult(

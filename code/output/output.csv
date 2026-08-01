@@ -1,0 +1,2 @@
+message_id,action,message_type,reason,confidence,evidence_message_ids
+msg_023,digest,business_update,Routine account update from a verified bank that can wait.,0.8627,message_0243;message_0102;message_0101;message_0011;message_0242

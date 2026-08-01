@@ -2,7 +2,7 @@
 
 Organizes the incoming message, conversation type, retrieval summary,
 media summary, relationship summaries, engagement data, urgency, and
-safety signals into readable sections — not raw JSON dumps.
+safety signals into readable sections—not raw JSON dumps.
 """
 
 from __future__ import annotations
@@ -14,29 +14,168 @@ from models.schemas import MessageContext
 from retrieval.types import RetrievalResult
 from utils.helpers import safe_str
 
-SYSTEM_PROMPT = """You are a message notification router for WhatsApp.
+SYSTEM_PROMPT = """You are the AI Notification Routing Engine.
 
-For each incoming message, decide how it should be handled for the receiving user:
+Your responsibility is to decide whether a WhatsApp message should:
+- notify
+- digest
+- mute
 
-- notify: important enough to interrupt the user now
-- digest: useful but can be shown later
-- mute: low-value, repetitive, unwanted, suspicious, or unsafe
+Your primary objective is to minimize unnecessary interruptions while never missing genuinely important messages.
 
-Return a JSON object with exactly these fields:
+Use retrieval history, engagement history, media analysis, and policy signals together.
+
+DECISION GUIDE
+
+NOTIFY
+Use notify only if:
+- immediate user attention is valuable
+- message is urgent
+- trusted sender with important information
+- family emergency
+- security alert
+- payment due today
+- travel changes
+- OTP explicitly requested by the user
+
+DIGEST
+Use digest when:
+- useful
+- informative
+- reminder
+- newsletters
+- promotions from known businesses
+- order updates
+- routine banking
+- event reminders
+- messages that can wait
+
+MUTE
+Use mute when:
+- scams
+- phishing
+- fake OTP
+- spam
+- malicious links
+- repeated forwards
+- low-value mass broadcasts
+- suspicious payment requests
+
+EXAMPLE DECISION MATRIX
+
+Trusted + Urgent
+→ notify
+
+Trusted + Non-Urgent
+→ digest
+
+Unknown + Promotional
+→ digest
+
+Unknown + Scam Indicators
+→ mute
+
+Known Spam
+→ mute
+
+Routine Reminder
+→ digest
+
+Emergency from Family
+→ notify
+
+SCORE EXPLANATIONS
+
+Business Verification Score
+Measures sender authenticity.
+It DOES NOT mean the notification deserves interruption.
+
+Overall Notification Priority Score
+Measures whether interrupting the user is worthwhile.
+A verified sender may still deserve digest.
+
+User Interest Score
+Measures historical engagement.
+High interest increases notify likelihood.
+
+DO NOT
+
+Do NOT assume every verified business deserves notify.
+Do NOT confuse authenticity with urgency.
+Do NOT classify advertisements as urgent.
+Do NOT overreact to capital letters.
+Do NOT infer emergencies that are not stated.
+Do NOT invent facts.
+Do NOT invent evidence.
+Do NOT reference information outside the prompt.
+
+CONFIDENCE GUIDE
+
+0.95-1.00
+Obvious decision
+Policy-like certainty
+
+0.80-0.94
+Strong evidence
+Little ambiguity
+
+0.60-0.79
+Moderate confidence
+Mixed evidence
+
+0.40-0.59
+Weak evidence
+Many conflicting signals
+
+Below 0.40
+Very uncertain
+Use only when evidence is poor.
+
+OUTPUT RULES
+
+Return ONLY valid JSON.
+Never output Markdown.
+Never explain reasoning.
+Never output code fences.
+Never output comments.
+
+Return exactly:
 {
-  "action": "notify" | "digest" | "mute",
-  "message_type": "personal" | "urgent" | "event" | "payment" | "business_update" | "promotion" | "greeting" | "forward" | "spam" | "scam" | "unknown",
-  "reason": "short human-readable explanation (1-2 sentences)",
-  "confidence": 0.0 to 1.0
+  "action":"",
+  "message_type":"",
+  "reason":"",
+  "confidence":0.0
 }
 
-Rules:
-- Risky messages (OTP requests, payment pressure, phishing links, QR payment prompts) must be muted with message_type scam or spam.
-- Personalized decisions: use the user's relationship with the sender/business/group.
-- A trusted sender with an urgent request should be notified.
-- Repeated forwards/greetings from a sender the user ignores should be muted.
-- A verified business the user actively uses should be notified for transactional updates.
-- Promotions from businesses the user opted out of should be muted.
+Allowed values:
+- action: notify | digest | mute
+- message_type: personal | urgent | event | payment | business_update | promotion | greeting | forward | spam | scam | unknown
+
+FEW-SHOT EXAMPLES
+
+Example 1
+Verified bank payment reminder due tomorrow
+→ digest
+
+Example 2
+Mother asking to call immediately
+→ notify
+
+Example 3
+OTP + PIN + payment link
+→ mute
+
+Example 4
+Movie promotion
+→ digest
+
+Example 5
+Group announcement about office fire drill today
+→ notify
+
+Example 6
+Repeated forwarded greeting
+→ mute
 """
 
 
@@ -48,20 +187,79 @@ def build_user_prompt(
     """Build a structured user prompt for the routing LLM."""
     sections: list[str] = []
 
-    # 1. Incoming message.
-    sections.append("## INCOMING MESSAGE")
+    # 1. USER PROFILE (from users.csv).
+    user = context.user or {}
+    sections.append("USER PROFILE")
+    sections.append("-" * 12)
+    dnd = safe_str(user.get("do_not_disturb_window")) or "Unknown"
+    sections.append(f"Do Not Disturb: {dnd}")
+    sections.append(
+        f"Messages opened: {user.get('messages_opened_30d', '?')}"
+    )
+    sections.append(f"Replies: {user.get('messages_replied_30d', '?')}")
+    sections.append(
+        f"Dismissed notifications: {user.get('notifications_dismissed_30d', '?')}"
+    )
+    sections.append(f"Reported messages: {user.get('messages_reported_30d', '?')}")
+
+    # 2. SENDER/BUSINESS/GROUP RELATIONSHIP context.
+    if retrieval.business_relationship is not None:
+        br = retrieval.business_relationship
+        sections.append("BUSINESS CONTEXT")
+        sections.append("-" * 16)
+        sections.append(f"Business: {br.display_name or br.business_id}")
+        sections.append(f"Category: {br.category}")
+        sections.append(f"Verified Business: {'Yes' if br.verified else 'No'}")
+        sections.append(f"Business Verification Score: {br.trust_score:.2f}")
+        sections.append(f"Relationship: {br.relationship_label}")
+        sections.append(f"Promotions Allowed: {'Yes' if br.allows_promotions else 'No'}")
+
+    if retrieval.sender_relationship is not None:
+        sr = retrieval.sender_relationship
+        sections.append("SENDER CONTEXT")
+        sections.append("-" * 14)
+        sections.append(f"Sender: {sr.sender_id}")
+        sections.append(f"Relationship: {sr.relationship_label}")
+        sections.append(f"Historical Messages: {sr.total_messages}")
+        sections.append(f"Reply Rate: {sr.reply_frequency:.0%}")
+        sections.append(f"Read Rate: {sr.read_frequency:.0%}")
+        sections.append(f"Ignore Rate: {sr.ignore_frequency:.0%}")
+
+    if retrieval.group_relationship is not None:
+        gr = retrieval.group_relationship
+        sections.append("GROUP CONTEXT")
+        sections.append("-" * 13)
+        sections.append(f"Group: {gr.group_name or gr.group_id}")
+        sections.append(f"Type: {gr.group_type}")
+        sections.append(f"Importance: {gr.importance_label}")
+        sections.append(f"Muted: {'Yes' if gr.is_muted else 'No'}")
+
+    # 3. USER PRIORITY SIGNALS.
+    sections.append("USER PRIORITY SIGNALS")
+    sections.append("-" * 21)
+    sections.append(f"Overall Notification Priority Score: {retrieval.trust_score:.2f}")
+    sections.append(f"User Interest Score: {retrieval.interest_score:.2f}")
+
+    # 4. CURRENT MESSAGE.
+    sections.append("CURRENT MESSAGE")
+    sections.append("-" * 15)
     sections.append(f"Message ID: {context.message_id}")
     sections.append(f"Conversation type: {context.conversation_type}")
     sections.append(f"Created at: {context.created_at}")
-    sections.append(f"Forwarded count: {context.forwarded_count}")
+    sections.append(
+        f"Media: {safe_str(context.media_type) or 'none'}"
+    )
+    sections.append(
+        f"Forwarded: {'Yes' if context.forwarded_count > 0 else 'No'} "
+        f"({context.forwarded_count} times)"
+    )
     if context.message_text:
         sections.append(f"Text: {context.message_text}")
-    else:
-        sections.append("Text: (none)")
 
-    # 2. Media summary.
+    # 5. MEDIA CONTENT.
     if media is not None and media.has_media:
-        sections.append("## MEDIA CONTENT")
+        sections.append("MEDIA CONTENT")
+        sections.append("-" * 13)
         sections.append(f"Media type: {media.media_type}")
         if media.summary:
             sections.append(f"Summary: {media.summary}")
@@ -70,62 +268,32 @@ def build_user_prompt(
                 if values:
                     sections.append(f"{key}: {', '.join(values[:5])}")
         if media.urgency_indicators:
-            sections.append(f"Urgency indicators: {', '.join(media.urgency_indicators)}")
+            sections.append(
+                f"Urgency indicators: {', '.join(media.urgency_indicators)}"
+            )
         if media.safety_indicators:
-            sections.append(f"Safety indicators: {', '.join(media.safety_indicators)}")
+            sections.append(
+                f"Safety indicators: {', '.join(media.safety_indicators)}"
+            )
 
-    # 3. Retrieval summary.
-    sections.append("## RETRIEVAL SUMMARY")
+    # 6. RETRIEVAL SUMMARY (natural language).
+    sections.append("RETRIEVAL SUMMARY")
+    sections.append("-" * 17)
     sections.append(retrieval.retrieval_summary)
 
-    # 4. Sender relationship.
-    if retrieval.sender_relationship is not None:
-        sr = retrieval.sender_relationship
-        sections.append("## SENDER RELATIONSHIP")
-        sections.append(
-            f"Sender: {sr.sender_id} | Label: {sr.relationship_label} | "
-            f"Messages: {sr.total_messages} | Reply rate: {sr.reply_frequency:.0%} | "
-            f"Read rate: {sr.read_frequency:.0%} | Ignore rate: {sr.ignore_frequency:.0%}"
-        )
-
-    # 5. Business relationship.
-    if retrieval.business_relationship is not None:
-        br = retrieval.business_relationship
-        sections.append("## BUSINESS RELATIONSHIP")
-        sections.append(
-            f"Business: {br.display_name or br.business_id} | "
-            f"Category: {br.category} | Verified: {br.verified} | "
-            f"Label: {br.relationship_label} | Trust: {br.trust_score:.2f}"
-        )
-
-    # 6. Group relationship.
-    if retrieval.group_relationship is not None:
-        gr = retrieval.group_relationship
-        sections.append("## GROUP RELATIONSHIP")
-        sections.append(
-            f"Group: {gr.group_name or gr.group_id} | Type: {gr.group_type} | "
-            f"Importance: {gr.importance_label} | Muted: {gr.is_muted}"
-        )
-
-    # 7. Engagement summary.
-    es = retrieval.engagement_summary
-    sections.append("## ENGAGEMENT SUMMARY")
-    sections.append(
-        f"Historical messages: {es.total_historical} | "
-        f"Open rate: {es.open_rate:.0%} | Reply rate: {es.reply_rate:.0%} | "
-        f"Dismiss rate: {es.dismiss_rate:.0%} | Mute rate: {es.mute_rate:.0%} | "
-        f"Report rate: {es.report_rate:.0%}"
-    )
-
-    # 8. Trust / interest scores.
-    sections.append("## SCORES")
-    sections.append(f"Trust score: {retrieval.trust_score:.2f}")
-    sections.append(f"Interest score: {retrieval.interest_score:.2f}")
-
-    # 9. Evidence.
-    if retrieval.evidence_message_ids:
-        sections.append("## EVIDENCE MESSAGE IDS")
-        sections.append(";".join(retrieval.evidence_message_ids))
+    # 7. SIMILAR HISTORY (evidence).
+    if retrieval.top_similar_messages:
+        sections.append("SIMILAR HISTORY")
+        sections.append("-" * 15)
+        for sm in retrieval.top_similar_messages:
+            hist = sm.message or {}
+            hist_date = ""
+            if hist.get("created_at"):
+                hist_date = str(hist.get("created_at"))[:10]
+            sections.append(
+                f"- {sm.message_id} ({hist_date}): "
+                f"{safe_str(hist.get('message_text'))[:120]}"
+            )
 
     sections.append("")
     sections.append("Return the routing decision as JSON.")
@@ -152,6 +320,8 @@ def build_prompt_summary(
         parts.append(f"business={retrieval.business_relationship.relationship_label}")
     if retrieval.group_relationship:
         parts.append(f"group={retrieval.group_relationship.importance_label}")
-    parts.append(f"trust={retrieval.trust_score:.2f}")
+    parts.append(
+        f"priority={retrieval.trust_score:.2f}"
+    )
     parts.append(f"interest={retrieval.interest_score:.2f}")
     return " | ".join(parts)

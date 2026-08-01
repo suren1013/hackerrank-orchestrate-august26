@@ -1,11 +1,15 @@
 """AI Notification Router: produces the final routing decision.
 
-Orchestrates:
-1. Prompt building (structured, readable sections)
-2. LLM call via a provider abstraction (OpenAI / Gemini / Ollama / Mock)
-3. Validation of the LLM output
-4. Confidence calibration (retrieval + safety + media signals)
-5. Postprocessing (attach evidence IDs from retrieval only)
+Pipeline:
+1. PolicyEngine evaluates deterministic rules (scam detection, trusted
+   urgent, media failures, repetitive spam). If a rule fires, the LLM is
+   skipped entirely and the policy decision becomes the final decision.
+2. Only ambiguous messages (no policy rule fired) go to the LLM:
+   - prompt building (structured, readable sections)
+   - LLM call via a provider abstraction (OpenAI / Gemini / Ollama / Mock)
+   - validation of the LLM output
+   - confidence calibration (retrieval + safety + media signals)
+   - postprocessing (attach evidence IDs from retrieval only)
 
 The router is provider-independent: switch models by changing the
 LLM_PROVIDER environment variable.
@@ -24,6 +28,8 @@ from llm.validator import ValidationError, fallback_response, validate_response
 from media.processor import MediaProcessor
 from media.types import MediaResult
 from models.schemas import MessageContext
+from policy.engine import PolicyEngine
+from policy.types import PolicyDecision
 from retrieval.retriever import RetrievalEngine
 from retrieval.types import RetrievalResult
 from utils.logger import get_logger
@@ -39,10 +45,12 @@ class Router:
         provider: LLMProvider | None = None,
         retrieval_engine: RetrievalEngine | None = None,
         media_processor: MediaProcessor | None = None,
+        policy_engine: PolicyEngine | None = None,
     ) -> None:
         self.provider = provider or create_provider()
         self.retrieval_engine = retrieval_engine or RetrievalEngine()
         self.media_processor = media_processor or MediaProcessor()
+        self.policy_engine = policy_engine or PolicyEngine()
         logger.info("Router initialized with provider=%s.", type(self.provider).__name__)
 
     def route(
@@ -74,29 +82,36 @@ class Router:
         if media is None:
             media = self.media_processor.process(context)
 
-        # 2. Build the prompt.
+        # 2. Run the deterministic policy engine.
+        policy_decision = self.policy_engine.evaluate(context, retrieval, media)
+
+        if policy_decision is not None:
+            # Skip the LLM entirely — produce the final decision directly.
+            return self._from_policy(context.message_id, retrieval, policy_decision)
+
+        # 3. Build the prompt (only for ambiguous messages).
         user_prompt = build_user_prompt(context, retrieval, media)
         prompt_summary = build_prompt_summary(context, retrieval, media)
 
-        # 3. Call the LLM provider.
+        # 4. Call the LLM provider.
         try:
             llm_response = self.provider.complete(SYSTEM_PROMPT, user_prompt)
         except Exception as exc:
             logger.error("LLM call failed for %s: %s", context.message_id, exc)
             llm_response = fallback_response(context.message_id, str(exc))
 
-        # 4. Validate the LLM output.
+        # 5. Validate the LLM output.
         try:
             validated = validate_response(llm_response)
         except ValidationError as exc:
             validated = fallback_response(context.message_id, str(exc))
 
-        # 5. Calibrate confidence.
+        # 6. Calibrate confidence.
         calibrated, notes = calibrate_confidence(
             validated.confidence, retrieval, media
         )
 
-        # 6. Build the final decision (evidence from retrieval only).
+        # 7. Build the final decision (evidence from retrieval only).
         decision = build_final_decision(
             message_id=context.message_id,
             validated=validated,
@@ -111,4 +126,56 @@ class Router:
             validated=validated,
             final_decision=decision,
             calibration_notes=notes,
+            policy_rule=None,
+            llm_skipped=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Policy path
+    # ------------------------------------------------------------------
+
+    def _from_policy(
+        self,
+        message_id: str,
+        retrieval: RetrievalResult,
+        policy: PolicyDecision,
+    ) -> RouterTrace:
+        """Build a RouterTrace from a policy decision (LLM skipped)."""
+        decision = RoutingDecision(
+            message_id=message_id,
+            action=policy.action,
+            message_type=policy.message_type,
+            reason=policy.reason,
+            confidence=policy.confidence,
+            evidence_message_ids=policy.evidence_message_ids,
+        )
+
+        # The policy decision acts as both the LLM "response" and validated output.
+        policy_response = LLMResponse(
+            action=policy.action,
+            message_type=policy.message_type,
+            reason=policy.reason,
+            confidence=policy.confidence,
+            raw="policy",
+        )
+
+        logger.info(
+            "Policy decision for %s: rule=%s action=%s type=%s confidence=%.2f "
+            "(LLM skipped)",
+            message_id,
+            policy.rule_name,
+            policy.action,
+            policy.message_type,
+            policy.confidence,
+        )
+
+        return RouterTrace(
+            message_id=message_id,
+            prompt_summary=f"Policy rule '{policy.rule_name}' fired; LLM skipped.",
+            llm_response=policy_response,
+            validated=policy_response,
+            final_decision=decision,
+            calibration_notes=["policy_override"],
+            policy_rule=policy.rule_name,
+            llm_skipped=True,
         )

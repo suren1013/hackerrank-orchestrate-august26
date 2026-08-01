@@ -1,0 +1,27 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment
+.env
+code/.env
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Generated outputs
+code/output/*
+!code/output/output.csv
+!code/output/.gitkeep

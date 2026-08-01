@@ -1,0 +1,1 @@
+"""Production inference pipeline for the Message Notification Router."""

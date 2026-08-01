@@ -13,6 +13,12 @@ faster-whisper>=1.0.0
 # LLM routing (HTTP-based providers)
 requests>=2.31.0
 
+# Environment variables
+python-dotenv>=1.0.0
+
+# Progress bar
+tqdm>=4.60.0
+
 # Note: Tesseract OCR binary must be installed on the system.
 #   Windows (winget):  winget install --id UB-Mannheim.TesseractOCR
 

@@ -4,7 +4,7 @@ Defines an ``LLMProvider`` interface and concrete implementations:
 
 - ``OpenAIProvider``  — OpenAI-compatible chat completions API (works with
   OpenAI, Azure OpenAI, Groq, Together, etc. via base_url).
-- ``GeminiProvider``  — Google Gemini generateContent API.
+- ``GeminiProvider``  — Google Gemini generateContent API with retry logic.
 - ``OllamaProvider``  — Local Ollama chat API.
 - ``MockProvider``    — Deterministic rule-based fallback (no network).
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -25,6 +26,11 @@ from llm.schemas import LLMResponse
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Retry configuration for transient failures.
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 1.0  # seconds; doubles each retry
 
 
 class LLMProvider(ABC):
@@ -48,9 +54,7 @@ class OpenAIProvider(LLMProvider):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
         self.base_url = (base_url or os.getenv("OPENAI_BASE_URL", "")).rstrip("/")
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        if not self.api_key:
-            logger.warning("OpenAIProvider: no OPENAI_API_KEY set.")
-        logger.info("OpenAIProvider initialized (model=%s).", self.model)
+        self._log_init("OpenAIProvider")
 
     def complete(self, system_prompt: str, user_prompt: str) -> LLMResponse:
         url = f"{self.base_url}/chat/completions" if self.base_url else (
@@ -69,15 +73,61 @@ class OpenAIProvider(LLMProvider):
             "temperature": 0.0,
             "response_format": {"type": "json_object"},
         }
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
+
+        resp = self._request_with_retry(
+            lambda: requests.post(url, headers=headers, json=payload, timeout=60)
+        )
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
         return _parse_llm_json(content)
 
+    def _log_init(self, name: str) -> None:
+        """Log provider initialization without exposing the API key."""
+        key_present = "Present" if self.api_key else "Missing"
+        logger.info("%s initialized", name)
+        logger.info("Model: %s", self.model)
+        logger.info("API Key: %s", key_present)
+
+    def _request_with_retry(self, request_fn):
+        """Execute a request with exponential backoff on transient failures."""
+        last_exc: Exception | None = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = request_fn()
+                if resp.status_code in RETRYABLE_STATUS_CODES:
+                    raise requests.HTTPError(
+                        f"HTTP {resp.status_code} from {self.__class__.__name__}"
+                    )
+                resp.raise_for_status()
+                return resp
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_exc = exc
+                logger.warning(
+                    "%s attempt %d/%d failed (network): %s",
+                    self.__class__.__name__,
+                    attempt,
+                    MAX_RETRIES,
+                    exc,
+                )
+            except requests.HTTPError as exc:
+                last_exc = exc
+                logger.warning(
+                    "%s attempt %d/%d failed (HTTP): %s",
+                    self.__class__.__name__,
+                    attempt,
+                    MAX_RETRIES,
+                    exc,
+                )
+            if attempt < MAX_RETRIES:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                logger.info("Retrying in %.1f seconds...", delay)
+                time.sleep(delay)
+
+        raise last_exc or RuntimeError("Request failed after retries")
+
 
 class GeminiProvider(LLMProvider):
-    """Google Gemini generateContent provider."""
+    """Google Gemini generateContent provider with retry and validation."""
 
     def __init__(
         self,
@@ -85,10 +135,8 @@ class GeminiProvider(LLMProvider):
         model: str | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("GEMINI_API_KEY", "")
-        self.model = model or os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-        if not self.api_key:
-            logger.warning("GeminiProvider: no GEMINI_API_KEY set.")
-        logger.info("GeminiProvider initialized (model=%s).", self.model)
+        self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        self._log_init("GeminiProvider")
 
     def complete(self, system_prompt: str, user_prompt: str) -> LLMResponse:
         url = (
@@ -109,11 +157,99 @@ class GeminiProvider(LLMProvider):
                 "responseMimeType": "application/json",
             },
         }
-        resp = requests.post(url, json=payload, timeout=60)
-        resp.raise_for_status()
+
+        resp = self._request_with_retry(
+            lambda: requests.post(url, json=payload, timeout=60)
+        )
         data = resp.json()
-        content = data["candidates"][0]["content"]["parts"][0]["text"]
+
+        # Validate the response structure before indexing.
+        content = self._extract_content(data, resp.status_code)
+
         return _parse_llm_json(content)
+
+    def _extract_content(self, data: dict[str, Any], status_code: int) -> str:
+        """Safely extract the text content from a Gemini response.
+
+        Raises
+        ------
+        RuntimeError
+            If the response is malformed (missing candidates/content/parts/text).
+        """
+        candidates = data.get("candidates")
+        if not candidates or not isinstance(candidates, list) or len(candidates) == 0:
+            raise RuntimeError(
+                f"Gemini response missing 'candidates' (HTTP {status_code}). "
+                f"Raw: {json.dumps(data)[:500]}"
+            )
+
+        candidate = candidates[0]
+        content = candidate.get("content")
+        if not content or not isinstance(content, dict):
+            raise RuntimeError(
+                f"Gemini candidate missing 'content' (HTTP {status_code}). "
+                f"Raw: {json.dumps(data)[:500]}"
+            )
+
+        parts = content.get("parts")
+        if not parts or not isinstance(parts, list) or len(parts) == 0:
+            raise RuntimeError(
+                f"Gemini content missing 'parts' (HTTP {status_code}). "
+                f"Raw: {json.dumps(data)[:500]}"
+            )
+
+        text = parts[0].get("text")
+        if not text:
+            raise RuntimeError(
+                f"Gemini part missing 'text' (HTTP {status_code}). "
+                f"Raw: {json.dumps(data)[:500]}"
+            )
+
+        return text
+
+    def _log_init(self, name: str) -> None:
+        """Log provider initialization without exposing the API key."""
+        key_present = "Present" if self.api_key else "Missing"
+        logger.info("%s initialized", name)
+        logger.info("Model: %s", self.model)
+        logger.info("API Key: %s", key_present)
+
+    def _request_with_retry(self, request_fn):
+        """Execute a request with exponential backoff on transient failures."""
+        last_exc: Exception | None = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = request_fn()
+                if resp.status_code in RETRYABLE_STATUS_CODES:
+                    raise requests.HTTPError(
+                        f"HTTP {resp.status_code} from {self.__class__.__name__}"
+                    )
+                resp.raise_for_status()
+                return resp
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_exc = exc
+                logger.warning(
+                    "%s attempt %d/%d failed (network): %s",
+                    self.__class__.__name__,
+                    attempt,
+                    MAX_RETRIES,
+                    exc,
+                )
+            except requests.HTTPError as exc:
+                last_exc = exc
+                logger.warning(
+                    "%s attempt %d/%d failed (HTTP): %s",
+                    self.__class__.__name__,
+                    attempt,
+                    MAX_RETRIES,
+                    exc,
+                )
+            if attempt < MAX_RETRIES:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                logger.info("Retrying in %.1f seconds...", delay)
+                time.sleep(delay)
+
+        raise last_exc or RuntimeError("Request failed after retries")
 
 
 class OllamaProvider(LLMProvider):
@@ -126,7 +262,9 @@ class OllamaProvider(LLMProvider):
     ) -> None:
         self.base_url = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
         self.model = model or os.getenv("OLLAMA_MODEL", "llama3.2")
-        logger.info("OllamaProvider initialized (model=%s).", self.model)
+        logger.info("OllamaProvider initialized")
+        logger.info("Model: %s", self.model)
+        logger.info("Base URL: %s", self.base_url)
 
     def complete(self, system_prompt: str, user_prompt: str) -> LLMResponse:
         url = f"{self.base_url}/api/chat"
@@ -213,25 +351,46 @@ class MockProvider(LLMProvider):
 
 
 def _parse_llm_json(content: str) -> LLMResponse:
-    """Parse a JSON string from an LLM into an LLMResponse."""
+    """Parse a JSON string from an LLM into an LLMResponse.
+
+    Handles cases where the LLM returns extra text before/after the JSON
+    by attempting to extract the outermost JSON object.
+    """
+    # Try direct parse first.
     try:
         data = json.loads(content)
+        return _build_response(data, content)
     except json.JSONDecodeError:
-        # Try to extract a JSON object from the text.
-        try:
-            start = content.find("{")
-            end = content.rfind("}") + 1
+        pass
+
+    # Try to extract the outermost JSON object (handles extra text).
+    try:
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start >= 0 and end > start:
             data = json.loads(content[start:end])
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("Failed to parse LLM JSON output.")
-            return LLMResponse(raw=content)
+            return _build_response(data, content)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Parsing failed — log the raw response and return an empty result.
+    logger.warning("Failed to parse LLM JSON output. Raw response: %s", content[:500])
+    return LLMResponse(raw=content)
+
+
+def _build_response(data: dict[str, Any], raw: str) -> LLMResponse:
+    """Build an LLMResponse from a parsed JSON dict."""
+    try:
+        confidence = float(data.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
 
     return LLMResponse(
         action=str(data.get("action", "")).strip(),
         message_type=str(data.get("message_type", "")).strip(),
         reason=str(data.get("reason", "")).strip(),
-        confidence=float(data.get("confidence", 0.0)),
-        raw=content,
+        confidence=confidence,
+        raw=raw,
     )
 
 

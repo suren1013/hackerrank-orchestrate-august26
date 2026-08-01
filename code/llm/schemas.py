@@ -89,6 +89,8 @@ class RouterTrace:
     validated: LLMResponse
     final_decision: RoutingDecision
     calibration_notes: list[str] = field(default_factory=list)
+    policy_rule: str | None = None
+    llm_skipped: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -98,4 +100,6 @@ class RouterTrace:
             "validated": self.validated.to_dict(),
             "final_decision": self.final_decision.to_dict(),
             "calibration_notes": self.calibration_notes,
+            "policy_rule": self.policy_rule,
+            "llm_skipped": self.llm_skipped,
         }
