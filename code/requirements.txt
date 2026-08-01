@@ -2,8 +2,21 @@
 pandas>=2.0.0
 numpy>=1.24.0
 
-# (Optional) Later phases will add:
-# - openai / anthropic for LLM routing
-# - pytesseract / easyocr for image OCR
-# - openai-whisper for voice transcription
-# - scikit-learn for retrieval / classification
+# Retrieval / similarity
+rapidfuzz>=3.0.0
+
+# Multimodal media processing
+Pillow>=10.0.0
+pytesseract>=0.3.10
+faster-whisper>=1.0.0
+
+# LLM routing (HTTP-based providers)
+requests>=2.31.0
+
+# Note: Tesseract OCR binary must be installed on the system.
+#   Windows (winget):  winget install --id UB-Mannheim.TesseractOCR
+
+# Optional LLM SDKs (install only if using those providers):
+#   openai>=1.0.0        # for LLM_PROVIDER=openai
+#   google-generativeai  # for LLM_PROVIDER=gemini
+#   ollama               # for LLM_PROVIDER=ollama (or use HTTP directly)

@@ -1,0 +1,18 @@
+{
+  "message_id": "msg_005",
+  "media_type": "image",
+  "media_id": "img_008",
+  "extracted_text": "",
+  "summary": "No text detected in image.",
+  "entities": {
+    "dates": [],
+    "times": [],
+    "money": [],
+    "links": [],
+    "phones": []
+  },
+  "urgency_indicators": [],
+  "safety_indicators": [],
+  "confidence": 0.0,
+  "error": null
+}

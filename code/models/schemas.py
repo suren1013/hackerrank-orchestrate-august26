@@ -63,6 +63,9 @@ class MessageContext:
     media_type: str
     media_id: str
     forwarded_count: int
+    group_id: str = ""
+    business_id: str = ""
+    sender_user_id: str = ""
 
     user: dict[str, Any] | None = None
     group: dict[str, Any] | None = None
@@ -82,6 +85,9 @@ class MessageContext:
             "message_id": self.message_id,
             "user_id": self.user_id,
             "conversation_type": self.conversation_type,
+            "group_id": self.group_id,
+            "business_id": self.business_id,
+            "sender_user_id": self.sender_user_id,
             "created_at": self.created_at,
             "message_text": self.message_text,
             "media_type": self.media_type,

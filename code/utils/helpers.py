@@ -13,13 +13,16 @@ import pandas as pd
 
 
 def is_empty(value: Any) -> bool:
-    """Return True if value is None, NaN, or an empty/whitespace string."""
+    """Return True if value is None, NaN, NaT, or an empty/whitespace string."""
     if value is None:
-        return True
-    if isinstance(value, float) and pd.isna(value):
         return True
     if isinstance(value, str):
         return value.strip() == ""
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
     return False
 
 

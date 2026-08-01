@@ -1,0 +1,20 @@
+{
+  "message_id": "msg_086",
+  "media_type": "voice",
+  "media_id": "vn_009",
+  "extracted_text": "Your airport pickup for tomorrow has moved to 6.15am. The driver and hotel booking remain the same.",
+  "summary": "Transcribed voice note. Contains times: 6.15am. Transcript: Your airport pickup for tomorrow has moved to 6.15am. The driver and hotel booking remain the same.",
+  "entities": {
+    "dates": [],
+    "times": [
+      "6.15am"
+    ],
+    "money": [],
+    "links": [],
+    "phones": []
+  },
+  "urgency_indicators": [],
+  "safety_indicators": [],
+  "confidence": 0.6,
+  "error": null
+}

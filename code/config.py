@@ -29,6 +29,24 @@ OUTPUT_DIR: Path = Path(
 # Media root referenced by images.csv / voice_notes.csv (relative paths).
 MEDIA_DIR: Path = DATASET_DIR / "media"
 
+# Directory to cache OCR / transcription results (avoids repeated work).
+MEDIA_CACHE_DIR: Path = Path(
+    os.getenv("MEDIA_CACHE_DIR", str(REPO_ROOT / "code" / "output" / "media_cache"))
+).resolve()
+
+# Path to the Tesseract OCR executable (Windows default from winget install).
+TESSERACT_CMD: str = os.getenv(
+    "TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
+
+# Whisper model size for transcription (tiny/base/small/medium/large-v3).
+WHISPER_MODEL_SIZE: str = os.getenv("WHISPER_MODEL_SIZE", "base")
+
+# Whisper device: use "cpu" by default for maximum compatibility.
+# Set WHISPER_DEVICE=cuda if a CUDA-capable GPU is available.
+WHISPER_DEVICE: str = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE: str = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
