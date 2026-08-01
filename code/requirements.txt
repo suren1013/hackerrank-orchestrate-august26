@@ -19,6 +19,9 @@ python-dotenv>=1.0.0
 # Progress bar
 tqdm>=4.60.0
 
+# Evaluation plots
+matplotlib>=3.7.0
+
 # Note: Tesseract OCR binary must be installed on the system.
 #   Windows (winget):  winget install --id UB-Mannheim.TesseractOCR
 

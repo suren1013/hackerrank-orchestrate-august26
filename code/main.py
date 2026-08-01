@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import OUTPUT_DIR  # noqa: E402
 from data.loader import DataLoader  # noqa: E402
+from evaluation.evaluator import Evaluator  # noqa: E402
 from inference.pipeline import InferencePipeline  # noqa: E402
 from inference.trace_logger import TraceLogger  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
@@ -52,12 +53,30 @@ def main() -> None:
         default=None,
         help="Pretty-print the saved trace for this message_id and exit.",
     )
+    parser.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="Run the evaluation suite against ground truth and exit.",
+    )
+    parser.add_argument(
+        "--ground-truth",
+        type=str,
+        default=None,
+        help="Path to ground truth CSV (default: dataset/sample_messages.csv).",
+    )
     args = parser.parse_args()
 
     # ---- Trace inspection mode --------------------------------------
     if args.trace:
         trace_logger = TraceLogger()
         trace_logger.pretty_print_trace(args.trace)
+        return
+
+    # ---- Evaluation mode --------------------------------------------
+    if args.evaluate:
+        evaluator = Evaluator()
+        gt_path = args.ground_truth if args.ground_truth else None
+        evaluator.evaluate(ground_truth_path=gt_path)
         return
 
     # ---- Inference mode ----------------------------------------------
